@@ -1,6 +1,14 @@
 import gobject
 
+import dbus.exceptions
+
 import cream.ipc
+
+NAME = 'Notifications'
+VENDOR = 'cream project'
+VERSION = '0.1'
+
+DEFAULT_EXPIRE_TIMEOUT = 10000
 
 MAX_ID = 2**32 - 1
 
@@ -12,7 +20,7 @@ def generate_ids():
         A generator for unique IDs.
     """
     while True:
-        i = 0
+        i = 1
         while i <= MAX_ID:
             yield i
             i += 1
@@ -36,6 +44,12 @@ class Expires(object):
     default = -1
     never = 0
 
+class Reason(object):
+    expired = 1
+    dismissed = 2
+    closed = 3
+    undefined = 4
+
 class Notification(object):
     def __init__(self, id, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout):
         self.id = id
@@ -48,9 +62,19 @@ class Notification(object):
         self.hints = hints
         self.expire_timeout = expire_timeout
 
+    def __repr__(self):
+        return '<Notification object #%d at 0x%x (%r)>' % (self.id, id(self), str(self.summary))
+
 class Server(cream.ipc.Object):
     __gsignals__ = {
         'get-capabilities': (gobject.SIGNAL_RUN_LAST, gobject.TYPE_PYOBJECT, ()), # required to return an array of strings
+        'show-notification': (gobject.SIGNAL_RUN_LAST, gobject.TYPE_NONE, (gobject.TYPE_PYOBJECT,)),
+        'hide-notification': (gobject.SIGNAL_RUN_LAST, gobject.TYPE_NONE, (gobject.TYPE_PYOBJECT,)),
+    }
+
+    __ipc_signals__ = {
+        'NotificationClosed': 'uu',
+        'ActionInvoked': 'us',
     }
 
     def __init__(self):
@@ -59,11 +83,36 @@ class Server(cream.ipc.Object):
             SERVICE_OBJECT
             )
         self.id_generator = generate_ids()
+        self.notifications = {}
+
+    def show(self, notification):
+        self.notifications[notification.id] = notification
+        print 'Show: %r' % notification
+        self.emit('show-notification', notification)
+
+    def hide(self, notification):
+        del self.notifications[notification.id]
+        print 'Hide: %r' % notification
+        self.emit('hide-notification', notification)
+
+    def close(self, notification, reason):
+        self.hide(notification)
+        self.emit_signal('NotificationClosed', notification.id, reason)
+
+    def invoke_action(self, notification, action_key):
+        self.emit_signal('ActionInvoked', notification.id, action_key)
 
     @cream.ipc.method('', 'as')
     def GetCapabilities(self):
         print ' --- get capabilities!'
         return self.emit('get-capabilities')
+
+    @cream.ipc.method('u', '')
+    def CloseNotification(self, id):
+        if id in self.notifications:
+            self.close(self.notifications[id], Reason.closed)
+        else:
+            raise DbusException()
 
     @cream.ipc.method('susssasa{sv}i', 'u')
     def Notify(self, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout):
@@ -85,7 +134,21 @@ class Server(cream.ipc.Object):
                                     actions,
                                     hints,
                                     expire_timeout)
+        # setup expire timeout
+        if expire_timeout == Expires.default:
+            expire_timeout = DEFAULT_EXPIRE_TIMEOUT
+        if expire_timeout != Expires.never:
+            def _expire():
+                self.close(notification, Reason.expired)
+                return False
+            gobject.timeout_add(expire_timeout, _expire)
+        # showtime
+        self.show(notification)
         return notification.id
+
+    @cream.ipc.method('', 'sss')
+    def GetServerInformation(self):
+        return (NAME, VENDOR, VERSION)
 
 if __name__ == '__main__':
     from dbus.mainloop.glib import DBusGMainLoop
