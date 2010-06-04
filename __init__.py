@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 import gobject
 
 import dbus.exceptions
@@ -50,6 +52,29 @@ class Reason(object):
     closed = 3
     undefined = 4
 
+Action = namedtuple('Action', 'key displayed')
+
+class ImageData(object):
+    def __init__(self, width, height, rowstride, has_alpha, bps, channels, data):
+        self.width = int(width)
+        self.height = int(height)
+        self.rowstride = int(rowstride)
+        self.has_alpha = bool(has_alpha)
+        self.bps = int(bps)
+        self.channels = int(channels)
+        self.data = map(int, data)
+
+    def to_gtk_pixbuf(self):
+        import gtk
+        return gtk.gdk.pixbuf_new_from_data(
+                ''.join(map(chr, self.data)),
+                gtk.gdk.COLORSPACE_RGB,
+                self.has_alpha,
+                self.bps,
+                self.width,
+                self.height,
+                self.rowstride)
+
 class Notification(object):
     def __init__(self, id, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout):
         self.id = id
@@ -58,12 +83,62 @@ class Notification(object):
         self.app_icon = app_icon
         self.summary = summary
         self.body = body
-        self.actions = actions
+        self.action_array = actions
         self.hints = hints
         self.expire_timeout = expire_timeout
 
+    @property
+    def urgency(self):
+        return int(self.hints.get('urgency', Urgency.normal))
+
+    @property
+    def category(self):
+        return str(self.hints.get('category', ''))
+
+    @property
+    def desktop_entry(self):
+        return str(self.hints.get('desktop-entry', ''))
+
+    @property
+    def image_data(self):
+        # icon_data == image-data? WTF.
+        if 'image-data' in self.hints:
+            return ImageData(*self.hints['image-data'])
+        elif 'icon_data' in self.hints:
+            return ImageData(*self.hints['icon_data'])
+        else:
+            return None
+
+    @property
+    def sound_file(self):
+        return str(self.hints.get('sound-file', ''))
+
+    @property
+    def suppress_sound(self):
+        return bool(self.hints.get('suppress-sound', False))
+
+    @property
+    def x(self):
+        return int(self.hints.get('x', -1))
+
+    @property
+    def y(self):
+        return int(self.hints.get('y', -1))
+
+    @property
+    def position(self):
+        return (self.x, self.y)
+
+    @property
+    def actions(self):
+        array = self.action_array
+        return [Action(*arg) for arg in zip(array[::2], array[1::2])]
+
     def __repr__(self):
         return '<Notification object #%d at 0x%x (%r)>' % (self.id, id(self), str(self.summary))
+
+    def __hash__(self):
+        return hash(self.id)
 
 class Server(cream.ipc.Object):
     __gsignals__ = {
@@ -87,12 +162,10 @@ class Server(cream.ipc.Object):
 
     def show(self, notification):
         self.notifications[notification.id] = notification
-        print 'Show: %r' % notification
         self.emit('show-notification', notification)
 
     def hide(self, notification):
         del self.notifications[notification.id]
-        print 'Hide: %r' % notification
         self.emit('hide-notification', notification)
 
     def close(self, notification, reason):
@@ -116,15 +189,6 @@ class Server(cream.ipc.Object):
 
     @cream.ipc.method('susssasa{sv}i', 'u')
     def Notify(self, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout):
-        print 'Notification!'
-        print ' - app name: %r' % app_name
-        print ' - replaces id: %r' % replaces_id
-        print ' - app icon: %r' % app_icon
-        print ' - summary: %r' % summary
-        print ' - body: %r' % body
-        print ' - actions: %r' % actions
-        print ' - hints: %r' % hints
-        print ' - expire timeout: %r' % expire_timeout
         notification = Notification(self.id_generator.next(),
                                     app_name,
                                     replaces_id,
